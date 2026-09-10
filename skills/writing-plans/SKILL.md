@@ -154,11 +154,13 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 After saving the plan, offer execution choice:
 
-**"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
+**"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Three execution options:**
 
 **1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
 
 **2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
+
+**3. Orca-Dispatch** - Same as Subagent-Driven, but dispatches workers through Orca orchestration across providers, with automatic fallback to another provider if one hits its plan limit mid-task
 
 **Which approach?"**
 
@@ -169,3 +171,7 @@ After saving the plan, offer execution choice:
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
 - Batch execution with checkpoints for review
+
+**If Orca-Dispatch chosen:**
+- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development in **orca** dispatch mode (see that skill's Dispatch Mode section)
+- Fresh implementer per task, dispatched via Orca across providers + two-stage review
