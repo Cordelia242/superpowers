@@ -30,6 +30,20 @@ that norms say you ask about first (a merge, a push to a shared branch, a
 publish); and a plan so broken that every path forward is a guess. For those,
 stop and ask.
 
+## Dispatch Mode
+
+This skill runs in one of two dispatch modes, stated by whoever invokes it
+(`writing-plans`'s Execution Handoff, or your human partner directly):
+
+- **native (default):** dispatch implementers with the `Agent` tool, in
+  this session. Everything below assumes this mode unless stated otherwise.
+- **orca:** dispatch implementers through Orca orchestration, across
+  whichever providers this Orca install has configured, with automatic
+  fallback to a different provider if one hits its own plan/quota limit
+  mid-task. Changes only "1. Dispatch the implementer," "2. Handle the
+  report," and the waiting guidance below — everything else (review, the
+  fix loop, the ledger, model selection) is identical in both modes.
+
 ## When to Use
 
 ```dot
@@ -243,6 +257,19 @@ any that finished without reporting. A bounded stretch keeps nearly
 all of a long wait's efficiency while guaranteeing a stuck or lost
 child is noticed within minutes, not at the end of the session.
 
+**Orca mode — waiting and liveness:** wait with `orca orchestration check
+--wait --types worker_done,escalation,question --timeout-ms <n>` in the
+same bounded stretches. Reply to any `question` immediately. If a wait
+window returns nothing, run a liveness checkpoint (`orca orchestration
+worker-show --dispatch <id>`, `orca terminal read --terminal <handle>`, or
+`orca terminal wait --terminal <handle> --for tui-idle`) — visible activity
+means keep waiting, it is not completion. Two consecutive empty windows
+with no activity and no `worker_done` is a **stalled dispatch**: treat it
+exactly like a `worker_done --outcome failed` in "2. Handle the report"
+below. A native `Agent` tool call cannot go silently unresponsive this way;
+an Orca-hosted provider terminal can, most often because that provider's
+own process died on its usage limit before it could report anything.
+
 ### 1. Dispatch the implementer
 
 Record BASE (`git rev-parse HEAD`) before dispatching — the review package
@@ -281,6 +308,19 @@ and fix-round diffs need it.
   fix-loop rounds 1-3 resume this agent.
 - Never dispatch multiple implementation subagents in parallel (conflicts).
 
+**Orca mode:** classify the task's tier (see Model Selection), then run
+`scripts/pick-provider <tier>` to choose a provider. Ensure a Run is bound
+for this plan (`orca orchestration run-current`, or `run-create` once if
+none exists yet — record its id as a `Run: <run_id>` ledger line the first
+time). Run `orca orchestration task-create --spec <task-brief path>` to get
+a task id, then `orca orchestration worker-start --task <task id>
+--worktree current --agent <chosen provider> [--model <id> --effort
+<level>, only for claude/codex/cursor]` to dispatch. Record the task id,
+dispatch id, chosen provider, and its headroom at dispatch time in the
+ledger, alongside the brief/report paths. The dispatch prompt content is
+unchanged — Orca delivers the same brief/report/context described above;
+only the delivery mechanism differs.
+
 Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
@@ -293,7 +333,30 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 
 **NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch.
 
-**BLOCKED:** The implementer cannot complete the task. Assess the blocker:
+**BLOCKED (or, in Orca mode, a stalled dispatch — see Waiting above):** the
+implementer cannot complete the task.
+
+**Orca mode only — classify before anything else:** run
+`scripts/pick-provider <tier>` again and read the current provider's own
+entry in its output. If its headroom is now ~0 or it's no longer eligible
+(or, only as corroboration, the report/terminal output names a usage/rate
+limit) — this is confirmed quota exhaustion, not an implementation problem:
+- Run `scripts/pick-provider <tier> --exclude <providers already tried for
+  this task>`. No eligible candidate → the fallback pool is exhausted: stop
+  hopping, ledger it, and adjudicate exactly like the fix loop's breaker
+  (park with a ruling, or escalate if load-bearing) — never silently give up.
+- Eligible candidate → `orca orchestration worker-start --task <task id>
+  --retry-of <dispatch id> --agent <next provider>`, framed like the fix
+  loop's round-4/5 takeover ("a prior attempt hit its provider's usage
+  limit on `<old>`; you own this task now on `<new>` — read the report
+  file for what was tried"), except the reason is quota, not difficulty.
+- Ledger: `Task <N>: provider-fallback <old>→<new> (headroom old=<x>%,
+  new=<y>%) — reason: quota exhausted (dispatch <old_id>→<new_id>)`.
+- This never applies to fix-loop rounds — those keep resuming the same
+  implementer/provider exactly as described in the fix loop below.
+
+If the provider is not quota-exhausted (or you're in native mode), assess
+the blocker normally:
 1. If it's a context problem, provide more context and re-dispatch with the same model
 2. If the task requires more reasoning, re-dispatch with a more capable model
 3. If the task is too large, break it into smaller pieces
