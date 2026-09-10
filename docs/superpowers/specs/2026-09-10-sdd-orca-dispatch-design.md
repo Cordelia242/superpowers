@@ -225,22 +225,64 @@ lifecycle — before or during a fix round.
   install, to observe actual behavior rather than assume it — see Open
   Questions below for exactly what's unverified.
 
-## Open Questions / Risks (unverified — flag, don't assume)
+## Open Questions / Risks
 
-1. **What `rateLimits[provider].status`/`error` actually look like when a
-   provider is *truly* exhausted** is unobserved — the live probe run
-   during design only caught healthy accounts (20%/35% and 17%/64% used).
-   The exhaustion classification logic (Failure Flow step 2) is written
-   against the documented shape, not a confirmed exhausted-state sample.
-   Verify in the end-to-end dry run; adjust the classifier if the real
-   shape differs (e.g., `usedPercent` capping below 100, or `status`
-   flipping to something other than a changed `error` string).
-2. **Whether a rate-limited provider CLI hangs vs. exits cleanly** is
-   assumed, not observed. If it exits cleanly, `worker_done --outcome
-   failed` may never arrive either way (process is dead) and the stalled-
-   dispatch path is the only detection route — worth confirming which.
-3. **Text-pattern corroboration is inherently fragile** across providers
-   and will drift as provider CLIs change their own error copy. Treat it as
+1. **RESOLVED (2026-09-10 dry run):** `rateLimits[provider].status` when a
+   provider's session window hits 100% used — observed live, not assumed.
+   During Task 4's dry run, `codex` naturally hit `session.usedPercent:
+   100` mid-session. `status` stayed `"ok"` and `error` stayed `null`;
+   nothing flips. Orca only sets `status: "unavailable"`/a populated
+   `error` for auth/config problems (no session, OAuth disabled, not
+   signed in) — never for quota exhaustion. This confirms the design's
+   headroom-based check is the correct primary signal: a `status`-only
+   check would have incorrectly kept reporting a fully session-exhausted
+   provider as available. `pick-provider`'s output on this real data:
+   `{"chosen": "claude", "ranked": [{"provider":"claude","headroom":51},
+   {"provider":"codex","headroom":0}], ...}` — codex correctly demoted to
+   the bottom (headroom 0), still technically "eligible" per `status`,
+   which is exactly why headroom (not status alone) drives ranking.
+2. **RESOLVED (2026-09-10 dry run):** the core `worker-start` →
+   `check --wait` → `worker_done` mechanism (Task 2's actual design, not
+   the Antigravity workaround below) was run for real against `claude` and
+   worked end-to-end on the first try: `worker-start --agent claude`
+   returned `state: "ready"`; the dispatched worker did the task
+   autonomously and sent a structured `worker_done` with
+   `outcome: "succeeded"` and `filesModified`; `check --wait` received it
+   cleanly. No liveness-checkpoint path was exercised (nothing stalled).
+3. **NEW — found during the dry run, not anticipated in this spec:**
+   `orca orchestration worker-start --agent antigravity` fails at
+   `agent_readiness` with `lastError: "Agent startup blocked:
+   codex-trust-workspace"` — even after manually confirming the CLI's
+   one-time workspace-trust prompt on the reused terminal and verifying
+   the agent process was genuinely idle and ready. This appears to be an
+   Orca-side readiness-detection bug specific to the `antigravity`
+   launcher, not something this design can work around — Task 1-3 of the
+   implementation plan were dispatched by sending prompts directly to the
+   terminal via `orca terminal send` instead (unsupervised — no
+   `worker_done`, manual polling of rendered terminal screen output).
+   `pick-provider` never selects `antigravity` automatically anyway (it
+   has no `rateLimits` entry), so this doesn't block the design as
+   specified, but it does mean Antigravity is currently unusable through
+   the supervised `worker-start` path at all, manual or automatic.
+4. **NEW — found during the dry run:** `orca orchestration worker-release`
+   failed with an internal error (`Error invoking remote method
+   'session:set': TypeError: Cannot convert undefined or null to object`),
+   reproducibly, even after following the exact recovery instruction in
+   the error response (`worker-show` then retry with `--retry-request`).
+   The dispatch/task themselves were already `completed`/`succeeded` —
+   this only affects terminal cleanup, not correctness — but "run
+   `worker-release` after every worker_done" (Global Constraints / Agent
+   Guidance) cannot be treated as infallible; a release failure should not
+   be mistaken for a dispatch failure.
+5. **Still open, genuinely unverified:** whether a rate-limited provider
+   CLI hangs vs. exits cleanly on its own quota exhaustion — the dry run
+   observed a provider *approach* exhaustion (codex, session headroom hit
+   0) but not a dispatch actually failing because of it. The
+   stalled-dispatch liveness-checkpoint path (Task 2 Step 2) remains
+   untested against a real exhaustion-triggered failure.
+6. **Still open:** text-pattern corroboration (the secondary signal in
+   Failure Flow step 2) is inherently fragile across providers and will
+   drift as provider CLIs change their own error copy. Treat it as
    corroboration only, never as the primary trigger (already reflected in
    the design), and expect to revisit the pattern list periodically.
 
