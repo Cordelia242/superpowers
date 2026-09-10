@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Rank Orca-managed providers by remaining quota headroom for one task tier,
+# and choose the healthiest one not already excluded. Provider pool is
+# whatever `orca account list --json` reports under .result.rateLimits —
+# nothing hardcoded here.
+#
+# Usage: pick-provider TIER [--exclude p1,p2,...] [--input FILE]
+#   TIER: mechanical | standard | architecture (SDD's existing task tiers)
+#   --exclude: comma-separated provider names to skip (already tried for
+#              this task's fallback chain)
+#   --input: path to a JSON file shaped like `orca account list --json`
+#            output, used instead of calling the live Orca runtime
+#            (for testing; see test-pick-provider)
+#
+# Prints one JSON object to stdout:
+#   {"tier", "threshold", "chosen", "headroom", "meets_threshold",
+#    "ranked": [{"provider","headroom"}, ...],
+#    "excluded": [{"provider","reason"}, ...]}
+# "chosen" is null only when no provider has status "ok" and is not
+# excluded — that is a valid result, not an error. Exit 2 on a usage
+# error; otherwise exit 0 (propagating `orca`'s exit code only if the
+# live account-list call itself fails).
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+  echo "usage: pick-provider TIER [--exclude p1,p2,...] [--input FILE]" >&2
+  exit 2
+fi
+
+tier=$1
+shift
+
+exclude=""
+input=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --exclude) exclude=$2; shift 2 ;;
+    --input) input=$2; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "$tier" in
+  mechanical|standard|architecture) ;;
+  *) echo "unknown tier: $tier (expected mechanical|standard|architecture)" >&2; exit 2 ;;
+esac
+
+if [ -n "$input" ]; then
+  account_file="$input"
+else
+  account_file=$(mktemp)
+  trap 'rm -f "$account_file"' EXIT
+  orca account list --json > "$account_file"
+fi
+
+python3 - "$tier" "$exclude" "$account_file" <<'PY'
+import json
+import sys
+
+tier, exclude_arg, account_file = sys.argv[1], sys.argv[2], sys.argv[3]
+exclude = {p for p in exclude_arg.split(",") if p}
+
+THRESHOLDS = {"mechanical": 5, "standard": 15, "architecture": 40}
+
+with open(account_file) as f:
+    data = json.load(f)
+
+rate_limits = data.get("result", {}).get("rateLimits", {})
+
+ranked = []
+excluded = []
+for provider, info in rate_limits.items():
+    if not isinstance(info, dict) or "status" not in info:
+        continue
+    if provider in exclude:
+        excluded.append({"provider": provider, "reason": "excluded"})
+        continue
+    if info.get("status") != "ok":
+        excluded.append({
+            "provider": provider,
+            "reason": info.get("error") or info.get("status") or "not ok",
+        })
+        continue
+    session_pct = (info.get("session") or {}).get("usedPercent") or 0
+    weekly_pct = (info.get("weekly") or {}).get("usedPercent") or 0
+    headroom = 100 - max(session_pct, weekly_pct)
+    ranked.append({"provider": provider, "headroom": headroom})
+
+ranked.sort(key=lambda r: r["headroom"], reverse=True)
+
+threshold = THRESHOLDS[tier]
+chosen = ranked[0] if ranked else None
+
+result = {
+    "tier": tier,
+    "threshold": threshold,
+    "chosen": chosen["provider"] if chosen else None,
+    "headroom": chosen["headroom"] if chosen else None,
+    "meets_threshold": bool(chosen and chosen["headroom"] >= threshold),
+    "ranked": ranked,
+    "excluded": excluded,
+}
+print(json.dumps(result))
+PY

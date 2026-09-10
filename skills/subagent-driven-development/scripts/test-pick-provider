@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Fixture-based self-check for pick-provider. No live Orca dependency.
+# Usage: ./test-pick-provider
+set -euo pipefail
+
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fail_count=0
+
+check() {
+  local name=$1 out_file=$2 expected_chosen=$3 expected_meets=$4
+  if ! python3 - "$name" "$out_file" "$expected_chosen" "$expected_meets" <<'PY'
+import json
+import sys
+
+name, out_file, expected_chosen, expected_meets = sys.argv[1:5]
+with open(out_file) as f:
+    d = json.load(f)
+
+expected_chosen = None if expected_chosen == "null" else expected_chosen
+expected_meets = expected_meets == "true"
+
+ok = True
+if d.get("chosen") != expected_chosen:
+    print(f"{name}: expected chosen={expected_chosen!r}, got {d.get('chosen')!r}", file=sys.stderr)
+    ok = False
+if d.get("meets_threshold") != expected_meets:
+    print(f"{name}: expected meets_threshold={expected_meets}, got {d.get('meets_threshold')!r}", file=sys.stderr)
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+  then
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+# Fixture 1: two healthy providers, one unavailable.
+cat > "$tmp/healthy.json" <<'JSON'
+{"id":"x","ok":true,"result":{"rateLimits":{
+  "claude":{"session":{"usedPercent":20},"weekly":{"usedPercent":35},"status":"ok"},
+  "codex":{"session":{"usedPercent":17},"weekly":{"usedPercent":64},"status":"ok"},
+  "gemini":{"status":"unavailable","error":"Gemini CLI OAuth is disabled"}
+}}}
+JSON
+
+"$dir/pick-provider" architecture --input "$tmp/healthy.json" > "$tmp/out1.json"
+check "healthy/architecture picks highest headroom" "$tmp/out1.json" "claude" "true"
+
+"$dir/pick-provider" architecture --exclude claude --input "$tmp/healthy.json" > "$tmp/out2.json"
+check "excluding claude falls to codex, below architecture threshold" "$tmp/out2.json" "codex" "false"
+
+"$dir/pick-provider" standard --exclude claude --input "$tmp/healthy.json" > "$tmp/out3.json"
+check "excluding claude still meets standard threshold" "$tmp/out3.json" "codex" "true"
+
+# Fixture 2: one provider effectively exhausted (100% weekly).
+cat > "$tmp/exhausted.json" <<'JSON'
+{"id":"y","ok":true,"result":{"rateLimits":{
+  "claude":{"session":{"usedPercent":95},"weekly":{"usedPercent":100},"status":"ok"},
+  "codex":{"session":{"usedPercent":10},"weekly":{"usedPercent":12},"status":"ok"}
+}}}
+JSON
+
+"$dir/pick-provider" mechanical --input "$tmp/exhausted.json" > "$tmp/out4.json"
+check "exhausted provider is ranked last, healthy one chosen" "$tmp/out4.json" "codex" "true"
+
+# Fixture 3: no providers tracked at all.
+cat > "$tmp/empty.json" <<'JSON'
+{"id":"z","ok":true,"result":{"rateLimits":{}}}
+JSON
+
+"$dir/pick-provider" mechanical --input "$tmp/empty.json" > "$tmp/out5.json"
+check "no eligible providers yields chosen=null" "$tmp/out5.json" "null" "false"
+
+# Fixture 4: rateLimits containing non-provider metadata keys (real Orca schema).
+cat > "$tmp/metadata.json" <<'JSON'
+{"id":"m","ok":true,"result":{"rateLimits":{
+  "claude":{"session":{"usedPercent":20},"weekly":{"usedPercent":35},"status":"ok"},
+  "minimaxCookieConfigured":false,
+  "claudeTarget":{"runtime":"host","wslDistro":null},
+  "inactiveClaudeAccounts":[]
+}}}
+JSON
+
+"$dir/pick-provider" standard --input "$tmp/metadata.json" > "$tmp/out6.json"
+check "metadata keys ignored without crashing" "$tmp/out6.json" "claude" "true"
+
+if [ "$fail_count" -gt 0 ]; then
+  echo "$fail_count check(s) failed" >&2
+  exit 1
+fi
+echo "All pick-provider checks passed."
