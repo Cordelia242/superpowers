@@ -50,6 +50,12 @@ without re-deriving them.
     and it is not in `--exclude`. Providers absent from `rateLimits`
     entirely (e.g. `cursor`, `omp`, `pi` today) are never eligible for
     automatic selection.
+  - `rateLimits` also carries non-provider sibling keys in real Orca output
+    (`minimaxCookieConfigured`, `claudeTarget`, `codexTarget`,
+    `inactiveClaudeAccounts`, `inactiveCodexAccounts`, ...) — a value that
+    is not a dict, or a dict with no `status` key, is not a provider record
+    and must be skipped, not evaluated. (Found and fixed during Task 1's
+    execution; see the ruling after Task 1's commit step.)
   - Exit 2 on a usage error (bad tier, unknown flag). Otherwise exits 0 and
     propagates `orca`'s exit code only if the live `orca account list` call
     itself fails.
@@ -165,6 +171,19 @@ JSON
 "$dir/pick-provider" mechanical --input "$tmp/empty.json" > "$tmp/out5.json"
 check "no eligible providers yields chosen=null" "$tmp/out5.json" "null" "false"
 
+# Fixture 4: rateLimits containing non-provider metadata keys (real Orca schema).
+cat > "$tmp/metadata.json" <<'JSON'
+{"id":"m","ok":true,"result":{"rateLimits":{
+  "claude":{"session":{"usedPercent":20},"weekly":{"usedPercent":35},"status":"ok"},
+  "minimaxCookieConfigured":false,
+  "claudeTarget":{"runtime":"host","wslDistro":null},
+  "inactiveClaudeAccounts":[]
+}}}
+JSON
+
+"$dir/pick-provider" standard --input "$tmp/metadata.json" > "$tmp/out6.json"
+check "metadata keys ignored without crashing" "$tmp/out6.json" "claude" "true"
+
 if [ "$fail_count" -gt 0 ]; then
   echo "$fail_count check(s) failed" >&2
   exit 1
@@ -257,6 +276,12 @@ rate_limits = data.get("result", {}).get("rateLimits", {})
 ranked = []
 excluded = []
 for provider, info in rate_limits.items():
+    if not isinstance(info, dict) or "status" not in info:
+        # Real Orca payloads carry non-provider sibling keys alongside
+        # provider records (e.g. minimaxCookieConfigured: false,
+        # claudeTarget/codexTarget: {...}, inactive*Accounts: []).
+        # Skip anything that isn't shaped like a provider record.
+        continue
     if provider in exclude:
         excluded.append({"provider": provider, "reason": "excluded"})
         continue
@@ -302,6 +327,22 @@ Expected: `All pick-provider checks passed.` with exit code 0.
 git add skills/subagent-driven-development/scripts/pick-provider skills/subagent-driven-development/scripts/test-pick-provider
 git commit -m "feat(sdd): add pick-provider quota-aware provider ranking script"
 ```
+
+> **Ruling recorded during execution (2026-09-10):** the code above already
+> includes a fix found during Task 1's implementation and independently
+> verified afterward — real `orca account list --json` output nests
+> non-provider metadata keys (`minimaxCookieConfigured`, `claudeTarget`,
+> `codexTarget`, `inactiveClaudeAccounts`, `inactiveCodexAccounts`, ...)
+> directly inside `.result.rateLimits`, alongside the actual provider
+> records. The plan as originally drafted did not guard against this and
+> crashes with `AttributeError: 'bool' object has no attribute 'get'` on
+> live data — confirmed by re-running the unguarded version against a real
+> capture. The `isinstance(info, dict) and "status" in info` guard (and the
+> corresponding 6th fixture in `test-pick-provider`) is required, not
+> optional; both are already folded into the code blocks above, and Global
+> Constraints below now states the corrected contract. See the ledger
+> (`.superpowers/sdd/2026-09-10-sdd-orca-dispatch/progress.md`) for the
+> full ruling.
 
 ---
 

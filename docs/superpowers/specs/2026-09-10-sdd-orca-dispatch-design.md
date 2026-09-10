@@ -96,7 +96,14 @@ policy).
    Using the max of both windows means whichever window is closer to its
    cap is the one that determines eligibility — the binding constraint.
 3. Providers with `status != "ok"`, or absent from `rateLimits` entirely
-   (cursor/omp/pi today), are excluded from the automatic pool.
+   (cursor/omp/pi today), are excluded from the automatic pool. Real Orca
+   output also nests non-provider sibling keys directly inside
+   `rateLimits` (`minimaxCookieConfigured`, `claudeTarget`, `codexTarget`,
+   `inactiveClaudeAccounts`, `inactiveCodexAccounts`, ...) — anything that
+   isn't a dict with a `status` key is skipped as not a provider record.
+   (Found live during Task 1's implementation: the unguarded version
+   crashes with `AttributeError: 'bool' object has no attribute 'get'` the
+   first time it runs against real `orca account list --json` output.)
 4. Minimum headroom threshold by tier (a safety floor, not a provider
    list): `architecture ≥ 40`, `standard ≥ 15`, `mechanical ≥ 5`. A large
    task starting on an almost-exhausted provider is a task that dies
